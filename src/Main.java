@@ -1,13 +1,19 @@
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 import com.mongodb.MongoClient;
+import com.mongodb.client.MapReduceIterable;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
 
 import org.bson.Document;
 
 public class Main {
+
+	static double DAMPING_FACTOR = 0.85;
+	static int NB_ITERATIONS = 20;
 
 	public static void main(String[] args) {
 
@@ -25,18 +31,12 @@ public class Main {
 		Page pageC = new Page("C");
 		Page pageD = new Page("D");
 
-		//Creation du graphe
-		pageA.addInBoundLinks(pageC);
-		pageB.addInBoundLinks(pageA);
-		pageC.addInBoundLinks(pageA);
-		pageC.addInBoundLinks(pageB);
-		pageC.addInBoundLinks(pageC);
-
-		pageA.addOutBoundLinks(pageB);
-		pageA.addOutBoundLinks(pageC);
-		pageB.addOutBoundLinks(pageC);
-		pageC.addOutBoundLinks(pageA);
-		pageD.addOutBoundLinks(pageC);
+		//Creation des liens sortants
+		pageA.getOutBoundLinks().add(pageB);
+		pageA.getOutBoundLinks().add(pageC);
+		pageB.getOutBoundLinks().add(pageC);
+		pageC.getOutBoundLinks().add(pageA);
+		pageD.getOutBoundLinks().add(pageC);
 
 		pages.add(pageA);
 		pages.add(pageB);
@@ -52,9 +52,9 @@ public class Main {
 				Document doc = new Document("_id", i)
 						.append("name",currentpage.getName())
 						.append("PR",currentpage.getPageRank())
-						.append("DF",currentpage.getDumpingFactor())
 						.append("nb_outBoundLinks",currentpage.getOutBoundLinks().size());
 
+				//Recuperation des noms des pages liees
 				List<String> outBoundsLinksNames = new ArrayList<>();
 				for(int j=0; j<currentpage.getOutBoundLinks().size();j++){
 					outBoundsLinksNames.add(currentpage.getOutBoundLinks().get(j).getName());
@@ -65,18 +65,7 @@ public class Main {
 			}
 		}
 
-		//Affichage des résultats
-		for(int page =0; page<pages.size();page++){
-			Page currentpage = (Page) pages.get(page);
-			System.out.println("Page " + currentpage.getName());
-
-			System.out.println("PR: " + currentpage.getPageRank());
-		}
-
-		//TODO: Map Reduce
-		//TODO: iterations
-		//TODO: Bien afficher les resultats
-		
+		//MAPREDUCE - MongoDB
 		//Formule:
 		//PR(A) = (1-d) + d (PR(T1)/C(T1) + ... + PR(Tn)/C(Tn))
 		//		PR(A) is the PageRank of page A,
@@ -84,10 +73,56 @@ public class Main {
 		//		C(Ti) is the number of outbound links on page Ti and
 		//		d is a damping factor which can be set between 0 and 1.
 
-		//page.pagerank = (1-dumpingfactor) + dumping factor * ( pageT1.pagerank/numberoutboundlinksT1  ...)
+		String map ="function() {"
+				//Calculs des PR(Tn)/C(Tn)
+				+ "var nb_outLink = this.PR / this.nb_outBoundLinks;"
+				+ "for(var outBoundlink in this.outBoundLinks) {"
+				+ "emit(this.outBoundLinks[outBoundlink], nb_outLink);"
+				+ "}"
+				+ "emit(this.name, this.outBoundLinks);"
+				//Necessaire pour recuperer la page D
+				+ "emit(this.name, 0);"
+				+ "}";
 
+		String reduce ="function(name,value) {"
+				+ "var sum = 0;"
+				+ "for (var val in value) {"
+				+ "if(!isNaN(value[val])) {"
+				//Sommes des PR(Tn)/C(Tn)
+				+ "sum += value[val];"
+				+ "}"
+				+ "}"
+				//PR(A) = (1-d) + d * sum
+				+ "newpagerank = (1 -"+ DAMPING_FACTOR +") + "+ DAMPING_FACTOR +" * sum;"
+				+ "emit([name, newpagerank], 1);"
+				+ "}"; 
+
+		for(int i =0; i<NB_ITERATIONS;i++){
+
+			MapReduceIterable<Document> mapReduceResult = collection.mapReduce(map, reduce);
+			System.out.println("------------ Resultats mapReduce: ITERATION "+i+" ------------");
+
+			//Affichage des resultats
+			Iterator<Document> iterator = mapReduceResult.iterator();
+			while(iterator.hasNext())
+			{
+				Document documentResult = (Document)iterator.next();
+				try{
+					List<String> resultTolist = (List<String>) documentResult.get("_id"); 
+					String name = resultTolist.get(0);
+					double newpagerank = Double.parseDouble(String.valueOf(resultTolist.get(1)));
+
+					// MAJ de la collection
+					collection.updateOne(Filters.eq("name", name), 
+							new Document("$set", new Document("PR", newpagerank)));
+					//Affichage des résultats
+					System.out.println(documentResult.toString());
+				}catch(ClassCastException e){
+					//Si le resultat ne peut pas etre caster en liste de String
+				}
+			}
+		}
 		//Close DB
 		mongoClient.close();
 	}
-
 }
